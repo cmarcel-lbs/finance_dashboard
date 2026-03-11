@@ -1,6 +1,6 @@
 """
 Financial Markets Dashboard — HW3 Interactive Dashboard
-Built with Plotly Dash | Data: yfinance + FRED (via pandas_datareader)
+Built with Plotly Dash | Data: Stooq + FRED (via pandas_datareader)
 """
 
 import warnings
@@ -8,7 +8,6 @@ warnings.filterwarnings("ignore")
 
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import pandas_datareader as pdr
 from datetime import datetime, timedelta
 
@@ -88,14 +87,29 @@ MATURITY_ORDER = ["3-Month", "1-Year", "2-Year", "5-Year", "10-Year", "20-Year",
 
 # ── Data fetching helpers ─────────────────────────────────────────────────────
 def fetch_prices(tickers: list, period: str = "2y") -> pd.DataFrame:
-    """Download adjusted closing prices for a list of tickers."""
-    raw = yf.download(tickers, period=period, auto_adjust=True, progress=False)
-    if isinstance(raw.columns, pd.MultiIndex):
-        prices = raw["Close"]
-    else:
-        prices = raw[["Close"]]
-        prices.columns = tickers
-    return prices.dropna(how="all")
+    """Download closing prices via Stooq — works reliably on cloud servers.
+    Stooq period mapping: '6mo'->0.5y, '1y'->1y, '2y'->2y, '5y'->5y
+    """
+    period_map = {"6mo": 0.5, "1y": 1, "2y": 2, "5y": 5}
+    years = period_map.get(period, 2)
+    start = (datetime.today() - timedelta(days=int(365 * years))).strftime("%Y-%m-%d")
+    end   = datetime.today().strftime("%Y-%m-%d")
+
+    frames = {}
+    for t in tickers:
+        try:
+            df = pdr.get_data_stooq(t, start=start, end=end)
+            if not df.empty and "Close" in df.columns:
+                frames[t] = df["Close"].sort_index()
+        except Exception:
+            pass
+
+    if not frames:
+        return pd.DataFrame()
+
+    prices = pd.DataFrame(frames)
+    prices.index = pd.to_datetime(prices.index)
+    return prices.sort_index().dropna(how="all")
 
 
 def fetch_yield_curve(start: str = "2015-01-01") -> pd.DataFrame:
@@ -384,7 +398,7 @@ app.layout = html.Div(style={
         # ── Footer ────────────────────────────────────────────────────────────
         html.Div([
             html.Span("Data sourced from ", style={"color": COLORS["text_muted"], "fontSize": "11px"}),
-            html.Span("Yahoo Finance", style={"color": COLORS["accent"], "fontSize": "11px"}),
+            html.Span("Stooq", style={"color": COLORS["accent"], "fontSize": "11px"}),
             html.Span(" & ", style={"color": COLORS["text_muted"], "fontSize": "11px"}),
             html.Span("FRED (Federal Reserve)", style={"color": COLORS["accent"], "fontSize": "11px"}),
             html.Span(" · HW3 Financial Dashboard · CAM", style={"color": COLORS["text_muted"], "fontSize": "11px"}),
@@ -452,7 +466,10 @@ def update_stock_charts(tickers, period):
                   COLORS["accent4"], COLORS["gold"], "#79C0FF", "#56D364",
                   "#FF7B72", "#BC8CFF", "#F0883E", "#58A6FF", "#3FB950"]
     for i, t in enumerate(prices.columns):
-        norm = prices[t] / prices[t].dropna().iloc[0] * 100
+        clean = prices[t].dropna()
+        if clean.empty:
+            continue
+        norm = prices[t] / clean.iloc[0] * 100
         fig_price.add_trace(go.Scatter(
             x=norm.index, y=norm.values, name=t, mode="lines",
             line=dict(color=colour_seq[i % len(colour_seq)], width=2),
@@ -552,7 +569,9 @@ def update_monthly_heatmap(ticker, period):
     if ticker not in prices.columns:
         return go.Figure()
 
-    monthly = (prices[ticker]
+    series = prices[ticker].copy()
+    series.index = pd.to_datetime(series.index)
+    monthly = (series
                .resample("ME").last()
                .pct_change()
                .dropna() * 100)
